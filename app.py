@@ -4,6 +4,7 @@ import requests
 import numpy as np
 import os
 import time
+import json
 from databricks import sql
 
 app = Flask(__name__)
@@ -15,7 +16,6 @@ DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
 AI_URL = os.getenv("AI_URL")
 
-# ================= DEBUG ENV =================
 print("HOST:", DATABRICKS_HOST)
 print("HTTP PATH:", DATABRICKS_HTTP_PATH)
 print("TOKEN:", str(DATABRICKS_TOKEN)[:5] if DATABRICKS_TOKEN else None)
@@ -29,14 +29,14 @@ def get_conn():
         access_token=DATABRICKS_TOKEN
     )
 
-# ================= AI CALL (RETRY) =================
+# ================= AI CALL =================
 def get_embedding(image_bytes):
 
     files = {
         "file": ("img.jpg", image_bytes, "image/jpeg")
     }
 
-    for i in range(3):  # retry 3 lần
+    for _ in range(3):
         try:
             res = requests.post(AI_URL, files=files, timeout=10)
 
@@ -53,14 +53,13 @@ def get_embedding(image_bytes):
 
 # ================= COSINE =================
 def cosine(a, b):
-    a = np.array(a)
-    b = np.array(b)
-    return np.dot(a,b)/(np.linalg.norm(a)*np.linalg.norm(b))
+    a = np.array(a, dtype=float)
+    b = np.array(b, dtype=float)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # ================= REGISTER =================
 @app.route("/register", methods=["POST"])
 def register():
-
     try:
         name = request.form.get("name")
         file = request.files.get("file")
@@ -78,9 +77,10 @@ def register():
         conn = get_conn()
         cursor = conn.cursor()
 
+        # Lưu dưới dạng JSON string
         cursor.execute(
             "INSERT INTO face_db.faces VALUES (?, ?)",
-            (name, emb)
+            (name, json.dumps(emb))
         )
 
         cursor.close()
@@ -92,11 +92,9 @@ def register():
         print("REGISTER ERROR:", e)
         return "Server error", 500
 
-
-# ================= RECOGNIZE =================
+# ================= RECOGNIZE (ESP32) =================
 @app.route("/recognize", methods=["POST"])
 def recognize():
-
     try:
         data = request.get_json()
         emb = data.get("embedding")
@@ -107,7 +105,8 @@ def recognize():
         conn = get_conn()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT name, embedding FROM face_db.faces")
+        # LIMIT để tránh OOM
+        cursor.execute("SELECT name, embedding FROM face_db.faces LIMIT 50")
 
         best_name = "Unknown"
         best_score = 0
@@ -116,6 +115,12 @@ def recognize():
 
             name = row[0]
             emb_db = row[1]
+
+            # convert string → list
+            if isinstance(emb_db, str):
+                emb_db = json.loads(emb_db)
+
+            emb_db = [float(x) for x in emb_db]
 
             score = cosine(emb, emb_db)
 
@@ -137,9 +142,9 @@ def recognize():
         print("RECOGNIZE ERROR:", e)
         return jsonify({"name": "Error"}), 500
 
+# ================= RECOGNIZE IMAGE (WEB) =================
 @app.route("/recognize_image", methods=["POST"])
 def recognize_image():
-
     try:
         file = request.files.get("file")
 
@@ -154,7 +159,7 @@ def recognize_image():
         conn = get_conn()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT name, embedding FROM face_db.faces")
+        cursor.execute("SELECT name, embedding FROM face_db.faces LIMIT 50")
 
         best_name = "Unknown"
         best_score = 0
@@ -163,6 +168,11 @@ def recognize_image():
 
             name = row[0]
             emb_db = row[1]
+
+            if isinstance(emb_db, str):
+                emb_db = json.loads(emb_db)
+
+            emb_db = [float(x) for x in emb_db]
 
             score = cosine(emb, emb_db)
 
@@ -173,6 +183,8 @@ def recognize_image():
         cursor.close()
         conn.close()
 
+        print("Best (image):", best_name, best_score)
+
         if best_score > 0.5:
             return jsonify({"name": best_name})
 
@@ -182,11 +194,10 @@ def recognize_image():
         print("ERROR:", e)
         return jsonify({"name": "Error"}), 500
 
-# ================= HEALTH CHECK =================
+# ================= HEALTH =================
 @app.route("/")
 def home():
     return "Face API Running"
-
 
 # ================= RUN =================
 if __name__ == "__main__":
