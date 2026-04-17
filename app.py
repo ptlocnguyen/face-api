@@ -137,6 +137,50 @@ def recognize():
         print("RECOGNIZE ERROR:", e)
         return jsonify({"name": "Error"}), 500
 
+@app.route("/recognize_image", methods=["POST"])
+def recognize_image():
+
+    try:
+        file = request.files.get("file")
+
+        if not file:
+            return jsonify({"name": "Error"}), 400
+
+        emb = get_embedding(file.read())
+
+        if emb is None:
+            return jsonify({"name": "No face"})
+
+        conn = get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT name, embedding FROM face_db.faces")
+
+        best_name = "Unknown"
+        best_score = 0
+
+        for row in cursor.fetchall():
+
+            name = row[0]
+            emb_db = row[1]
+
+            score = cosine(emb, emb_db)
+
+            if score > best_score:
+                best_score = score
+                best_name = name
+
+        cursor.close()
+        conn.close()
+
+        if best_score > 0.5:
+            return jsonify({"name": best_name})
+
+        return jsonify({"name": "Unknown"})
+
+    except Exception as e:
+        print("ERROR:", e)
+        return jsonify({"name": "Error"}), 500
 
 # ================= HEALTH CHECK =================
 @app.route("/")
