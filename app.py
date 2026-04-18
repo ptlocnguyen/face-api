@@ -3,202 +3,163 @@ from flask_cors import CORS
 import requests
 import numpy as np
 import os
-import time
 import json
+import datetime
 from databricks import sql
 
 app = Flask(__name__)
+
+# QUAN TRỌNG: cho phép web gọi
 CORS(app)
 
-# ================= ENV =================
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
-DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
+# ===== ENV =====
+HOST = os.getenv("DATABRICKS_HOST")
+PATH = os.getenv("DATABRICKS_HTTP_PATH")
+TOKEN = os.getenv("DATABRICKS_TOKEN")
 AI_URL = os.getenv("AI_URL")
 
-print("HOST:", DATABRICKS_HOST)
-print("HTTP PATH:", DATABRICKS_HTTP_PATH)
-print("TOKEN:", str(DATABRICKS_TOKEN)[:5] if DATABRICKS_TOKEN else None)
-print("AI URL:", AI_URL)
-
-# ================= DB CONNECT =================
+# ===== DB =====
 def get_conn():
     return sql.connect(
-        server_hostname=DATABRICKS_HOST,
-        http_path=DATABRICKS_HTTP_PATH,
-        access_token=DATABRICKS_TOKEN
+        server_hostname=HOST,
+        http_path=PATH,
+        access_token=TOKEN
     )
 
-# ================= AI CALL =================
+# ===== AI =====
 def get_embedding(image_bytes):
 
     files = {
         "file": ("img.jpg", image_bytes, "image/jpeg")
     }
 
-    for _ in range(3):
-        try:
-            res = requests.post(AI_URL, files=files, timeout=10)
+    res = requests.post(AI_URL, files=files)
 
-            if res.status_code == 200:
-                data = res.json()
-                return data.get("embedding")
+    if res.status_code != 200:
+        return None
 
-        except Exception as e:
-            print("AI ERROR:", e)
+    return res.json().get("embedding")
 
-        time.sleep(1)
-
-    return None
-
-# ================= COSINE =================
+# ===== COSINE =====
 def cosine(a, b):
     a = np.array(a, dtype=float)
     b = np.array(b, dtype=float)
+
+    if len(a) != len(b):
+        return 0
+
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # ================= REGISTER =================
 @app.route("/register", methods=["POST"])
 def register():
-    try:
-        name = request.form.get("name")
-        file = request.files.get("file")
 
-        if not name or not file:
-            return "Missing data", 400
+    name = request.form.get("name")
+    file = request.files.get("file")
 
-        print("Register:", name)
+    emb = get_embedding(file.read())
 
-        emb = get_embedding(file.read())
+    if emb is None:
+        return "No face", 400
 
-        if emb is None:
-            return "No face detected", 400
+    conn = get_conn()
+    cur = conn.cursor()
 
-        conn = get_conn()
-        cursor = conn.cursor()
+    cur.execute(
+        "INSERT INTO face_db.faces VALUES (?, ?)",
+        (name, json.dumps(emb))
+    )
 
-        # Lưu dưới dạng JSON string
-        cursor.execute(
-            "INSERT INTO face_db.faces VALUES (?, ?)",
-            (name, json.dumps(emb))
-        )
+    cur.close()
+    conn.close()
 
-        cursor.close()
-        conn.close()
+    return "Saved"
 
-        return "Saved"
+# ================= RECOGNIZE (WEB) =================
+@app.route("/recognize_image", methods=["POST"])
+def recognize_image():
 
-    except Exception as e:
-        print("REGISTER ERROR:", e)
-        return "Server error", 500
+    file = request.files.get("file")
+
+    emb = get_embedding(file.read())
+
+    if emb is None:
+        return jsonify({"name": "No face"})
+
+    return match_face(emb, save_log=False)
 
 # ================= RECOGNIZE (ESP32) =================
 @app.route("/recognize", methods=["POST"])
 def recognize():
-    try:
-        data = request.get_json()
-        emb = data.get("embedding")
 
-        if emb is None:
-            return jsonify({"name": "Error"}), 400
+    file = request.files.get("file")
 
-        conn = get_conn()
-        cursor = conn.cursor()
+    emb = get_embedding(file.read())
 
-        # LIMIT để tránh OOM
-        cursor.execute("SELECT name, embedding FROM face_db.faces LIMIT 50")
+    if emb is None:
+        return jsonify({"name": "No face"})
 
-        best_name = "Unknown"
-        best_score = 0
+    return match_face(emb, save_log=True)
 
-        for row in cursor.fetchall():
+# ===== MATCH =====
+def match_face(emb, save_log):
 
-            name = row[0]
-            emb_db = row[1]
+    conn = get_conn()
+    cur = conn.cursor()
 
-            # convert string → list
-            if isinstance(emb_db, str):
-                emb_db = json.loads(emb_db)
+    cur.execute("SELECT name, embedding FROM face_db.faces")
 
-            emb_db = [float(x) for x in emb_db]
+    best_name = "Unknown"
+    best_score = 0
 
-            score = cosine(emb, emb_db)
+    for row in cur.fetchall():
 
-            if score > best_score:
-                best_score = score
-                best_name = name
+        name = row[0]
+        emb_db = json.loads(row[1])
 
-        cursor.close()
-        conn.close()
+        score = cosine(emb, emb_db)
 
-        print("Best:", best_name, best_score)
+        if score > best_score:
+            best_score = score
+            best_name = name
 
-        if best_score > 0.5:
-            return jsonify({"name": best_name})
+    if best_score > 0.5 and save_log:
 
-        return jsonify({"name": "Unknown"})
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    except Exception as e:
-        print("RECOGNIZE ERROR:", e)
-        return jsonify({"name": "Error"}), 500
+        cur.execute(
+            "INSERT INTO face_db.logs VALUES (?, ?)",
+            (best_name, now)
+        )
 
-# ================= RECOGNIZE IMAGE (WEB) =================
-@app.route("/recognize_image", methods=["POST"])
-def recognize_image():
-    try:
-        file = request.files.get("file")
+    cur.close()
+    conn.close()
 
-        if not file:
-            return jsonify({"name": "Error"}), 400
+    return jsonify({"name": best_name})
 
-        emb = get_embedding(file.read())
+# ================= LOGS =================
+@app.route("/logs")
+def logs():
 
-        if emb is None:
-            return jsonify({"name": "No face"})
+    conn = get_conn()
+    cur = conn.cursor()
 
-        conn = get_conn()
-        cursor = conn.cursor()
+    cur.execute("SELECT name, time FROM face_db.logs ORDER BY time DESC LIMIT 50")
 
-        cursor.execute("SELECT name, embedding FROM face_db.faces LIMIT 50")
+    data = []
 
-        best_name = "Unknown"
-        best_score = 0
+    for r in cur.fetchall():
+        data.append({
+            "name": r[0],
+            "time": r[1]
+        })
 
-        for row in cursor.fetchall():
+    cur.close()
+    conn.close()
 
-            name = row[0]
-            emb_db = row[1]
+    return jsonify(data)
 
-            if isinstance(emb_db, str):
-                emb_db = json.loads(emb_db)
-
-            emb_db = [float(x) for x in emb_db]
-
-            score = cosine(emb, emb_db)
-
-            if score > best_score:
-                best_score = score
-                best_name = name
-
-        cursor.close()
-        conn.close()
-
-        print("Best (image):", best_name, best_score)
-
-        if best_score > 0.5:
-            return jsonify({"name": best_name})
-
-        return jsonify({"name": "Unknown"})
-
-    except Exception as e:
-        print("ERROR:", e)
-        return jsonify({"name": "Error"}), 500
-
-# ================= HEALTH =================
+# ================= TEST =================
 @app.route("/")
 def home():
-    return "Face API Running"
-
-# ================= RUN =================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    return "API OK"
