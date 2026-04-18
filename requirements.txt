@@ -3,3 +3,4 @@ flask-cors
 requests
 numpy
 databricks-sql-connector[pyarrow]
+pytz
