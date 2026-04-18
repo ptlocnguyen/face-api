@@ -1,6 +1,5 @@
 Flask
+flask-cors
 requests
 numpy
-flask-cors
-databricks-sql-connector
-gunicorn
+databricks-sql-connector[pyarrow]
