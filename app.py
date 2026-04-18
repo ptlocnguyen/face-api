@@ -6,8 +6,14 @@ import os
 import json
 import datetime
 from databricks import sql
+import pytz
+import datetime
 
 app = Flask(__name__)
+
+def get_time_vn():
+    tz = pytz.timezone("Asia/Ho_Chi_Minh")
+    return datetime.datetime.now(tz)
 
 # ===== CORS =====
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -182,7 +188,7 @@ def recognize_image():
         conn = get_conn()
         cur = conn.cursor()
     
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_time_vn().strftime("%Y-%m-%d %H:%M:%S")
     
         cur.execute(
             "INSERT INTO face_db.logs VALUES (?, ?)",
@@ -215,7 +221,7 @@ def recognize():
             conn = get_conn()
             cur = conn.cursor()
 
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = get_time_vn().strftime("%Y-%m-%d %H:%M:%S")
 
             cur.execute(
                 "INSERT INTO face_db.logs VALUES (?, ?)",
