@@ -9,8 +9,15 @@ from databricks import sql
 
 app = Flask(__name__)
 
-# QUAN TRỌNG: cho phép web gọi
-CORS(app)
+# ===== CORS =====
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', '*')
+    response.headers.add('Access-Control-Allow-Methods', '*')
+    return response
 
 # ===== ENV =====
 HOST = os.getenv("DATABRICKS_HOST")
@@ -18,7 +25,14 @@ PATH = os.getenv("DATABRICKS_HTTP_PATH")
 TOKEN = os.getenv("DATABRICKS_TOKEN")
 AI_URL = os.getenv("AI_URL")
 
-# ===== DB =====
+print("HOST:", HOST)
+print("PATH:", PATH)
+print("AI:", AI_URL)
+
+# ===== CACHE =====
+faces_cache = []
+
+# ===== DB CONNECT =====
 def get_conn():
     return sql.connect(
         server_hostname=HOST,
@@ -26,19 +40,56 @@ def get_conn():
         access_token=TOKEN
     )
 
-# ===== AI =====
+# ===== LOAD CACHE =====
+def load_faces():
+    global faces_cache
+
+    print("Loading faces from DB...")
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("SELECT name, embedding FROM face_db.faces")
+
+        faces_cache = []
+
+        for row in cur.fetchall():
+            try:
+                faces_cache.append((row[0], json.loads(row[1])))
+            except:
+                continue
+
+        cur.close()
+        conn.close()
+
+        print("Loaded:", len(faces_cache), "faces")
+
+    except Exception as e:
+        print("LOAD ERROR:", e)
+
+# load 1 lần khi start
+load_faces()
+
+# ===== AI CALL =====
 def get_embedding(image_bytes):
 
     files = {
         "file": ("img.jpg", image_bytes, "image/jpeg")
     }
 
-    res = requests.post(AI_URL, files=files)
+    try:
+        res = requests.post(AI_URL, files=files, timeout=10)
 
-    if res.status_code != 200:
+        if res.status_code != 200:
+            print("AI ERROR:", res.text)
+            return None
+
+        return res.json().get("embedding")
+
+    except Exception as e:
+        print("AI FAIL:", e)
         return None
-
-    return res.json().get("embedding")
 
 # ===== COSINE =====
 def cosine(a, b):
@@ -50,72 +101,15 @@ def cosine(a, b):
 
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# ================= REGISTER =================
-@app.route("/register", methods=["POST"])
-def register():
-
-    name = request.form.get("name")
-    file = request.files.get("file")
-
-    emb = get_embedding(file.read())
-
-    if emb is None:
-        return "No face", 400
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        "INSERT INTO face_db.faces VALUES (?, ?)",
-        (name, json.dumps(emb))
-    )
-
-    cur.close()
-    conn.close()
-
-    return "Saved"
-
-# ================= RECOGNIZE (WEB) =================
-@app.route("/recognize_image", methods=["POST"])
-def recognize_image():
-
-    file = request.files.get("file")
-
-    emb = get_embedding(file.read())
-
-    if emb is None:
-        return jsonify({"name": "No face"})
-
-    return match_face(emb, save_log=False)
-
-# ================= RECOGNIZE (ESP32) =================
-@app.route("/recognize", methods=["POST"])
-def recognize():
-
-    file = request.files.get("file")
-
-    emb = get_embedding(file.read())
-
-    if emb is None:
-        return jsonify({"name": "No face"})
-
-    return match_face(emb, save_log=True)
-
 # ===== MATCH =====
-def match_face(emb, save_log):
+def match_face(emb):
 
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT name, embedding FROM face_db.faces")
+    global faces_cache
 
     best_name = "Unknown"
     best_score = 0
 
-    for row in cur.fetchall():
-
-        name = row[0]
-        emb_db = json.loads(row[1])
+    for name, emb_db in faces_cache:
 
         score = cosine(emb, emb_db)
 
@@ -123,43 +117,141 @@ def match_face(emb, save_log):
             best_score = score
             best_name = name
 
-    if best_score > 0.5 and save_log:
+    print("Best:", best_name, best_score)
 
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if best_score > 0.5:
+        return best_name
+
+    return "Unknown"
+
+# ================= REGISTER =================
+@app.route("/register", methods=["POST"])
+def register():
+
+    print("CALL /register")
+
+    name = request.form.get("name")
+    file = request.files.get("file")
+
+    if not name or not file:
+        return "Missing data", 400
+
+    emb = get_embedding(file.read())
+
+    if emb is None:
+        return "No face", 400
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
 
         cur.execute(
-            "INSERT INTO face_db.logs VALUES (?, ?)",
-            (best_name, now)
+            "INSERT INTO face_db.faces VALUES (?, ?)",
+            (name, json.dumps(emb))
         )
 
-    cur.close()
-    conn.close()
+        cur.close()
+        conn.close()
 
-    return jsonify({"name": best_name})
+        # update cache
+        faces_cache.append((name, emb))
+
+        return "Saved"
+
+    except Exception as e:
+        print("REGISTER ERROR:", e)
+        return "DB Error", 500
+
+# ================= RECOGNIZE (WEB) =================
+@app.route("/recognize_image", methods=["POST"])
+def recognize_image():
+
+    print("CALL /recognize_image")
+
+    file = request.files.get("file")
+
+    emb = get_embedding(file.read())
+
+    if emb is None:
+        return jsonify({"name": "No face"})
+
+    name = match_face(emb)
+
+    return jsonify({"name": name})
+
+# ================= RECOGNIZE (ESP32) =================
+@app.route("/recognize", methods=["POST"])
+def recognize():
+
+    print("CALL /recognize")
+
+    file = request.files.get("file")
+
+    emb = get_embedding(file.read())
+
+    if emb is None:
+        return jsonify({"name": "No face"})
+
+    name = match_face(emb)
+
+    # lưu log nếu nhận diện được
+    if name != "Unknown":
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            cur.execute(
+                "INSERT INTO face_db.logs VALUES (?, ?)",
+                (name, now)
+            )
+
+            cur.close()
+            conn.close()
+
+        except Exception as e:
+            print("LOG ERROR:", e)
+
+    return jsonify({"name": name})
 
 # ================= LOGS =================
 @app.route("/logs")
 def logs():
 
-    conn = get_conn()
-    cur = conn.cursor()
+    print("CALL /logs")
 
-    cur.execute("SELECT name, time FROM face_db.logs ORDER BY time DESC LIMIT 50")
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
 
-    data = []
+        cur.execute("SELECT name, time FROM face_db.logs LIMIT 20")
 
-    for r in cur.fetchall():
-        data.append({
-            "name": r[0],
-            "time": r[1]
-        })
+        data = []
 
-    cur.close()
-    conn.close()
+        for row in cur.fetchall():
+            data.append({
+                "name": row[0],
+                "time": row[1]
+            })
 
-    return jsonify(data)
+        cur.close()
+        conn.close()
 
-# ================= TEST =================
+        return jsonify(data)
+
+    except Exception as e:
+        print("LOGS ERROR:", e)
+        return jsonify([])
+
+# ================= RELOAD CACHE =================
+@app.route("/reload")
+def reload_cache():
+
+    load_faces()
+    return "Reloaded"
+
+# ================= HOME =================
 @app.route("/")
 def home():
     return "API OK"
