@@ -44,8 +44,8 @@ def get_users():
 @app.post("/face/register")
 async def register_face(user_id: str, file: UploadFile = File(...)):
     file_bytes = await file.read()
-    emb = get_embedding(file_bytes)
 
+    emb = get_embedding(file_bytes)
     if emb is None:
         return {"error": "Embedding failed"}
 
@@ -63,11 +63,13 @@ async def register_face(user_id: str, file: UploadFile = File(...)):
             (sample_id, user_id, emb)
         )
 
-        # ===== LOAD ALL EMBEDDING =====
-        cursor.execute(
-            "SELECT embedding FROM face_samples WHERE user_id = ?",
-            (user_id,)
-        )
+        # ===== CHỈ LẤY 5 EMBEDDING GẦN NHẤT =====
+        cursor.execute("""
+            SELECT embedding FROM face_samples
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 5
+        """, (user_id,))
 
         rows = cursor.fetchall()
 
@@ -85,7 +87,7 @@ async def register_face(user_id: str, file: UploadFile = File(...)):
                 continue
 
             if len(emb_list) == 512:
-                valid.append(emb_list)
+                valid.append(np.array(emb_list, dtype=np.float32))
 
         if len(valid) == 0:
             return {"error": "No valid embedding"}
@@ -115,6 +117,7 @@ async def face_recognize(file: UploadFile = File(...)):
     file_bytes = await file.read()
 
     user_id, score = recognize_face(file_bytes)
+
     result = "success" if user_id and score > 0.5 else "fail"
 
     with get_connection() as conn:
