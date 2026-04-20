@@ -1,6 +1,7 @@
 import requests
 import numpy as np
 from app.db import get_connection
+import os
 
 API_URL = os.getenv("AI_URL")
 
