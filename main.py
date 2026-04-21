@@ -578,3 +578,62 @@ async def delete_fingerprint(user_id: str = Form(...)):
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# =============================
+# ESP32 RECOGNIZE (RAW IMAGE)
+# =============================
+from fastapi import Request
+
+@app.post("/recognize-esp32")
+async def recognize_esp32(request: Request):
+
+    try:
+        init_system()
+
+        if model is None:
+            return {"status": "warming_up"}
+
+        # ===== LẤY RAW IMAGE =====
+        contents = await request.body()
+
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        img = np.array(image)
+
+        faces = model.get(img)
+
+        if len(faces) == 0:
+            insert_log("unknown", "face", "fail", "esp32")
+            return {"status": "no_face"}
+
+        emb = faces[0].embedding
+
+        best_user = None
+        best_score = 0
+
+        if embeddings_cache:
+            for item in embeddings_cache:
+                score = cosine_similarity(emb, item["embedding"])
+                if score > best_score:
+                    best_score = score
+                    best_user = item["user_id"]
+
+        print("[ESP32] SCORE:", best_score)
+
+        if best_score > 0.5:
+
+            insert_log(best_user, "face", "success", "esp32")
+
+            return {
+                "status": "success",
+                "user_id": best_user,
+                "score": float(best_score)
+            }
+
+        else:
+
+            insert_log("unknown", "face", "fail", "esp32")
+
+            return {"status": "unknown"}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
