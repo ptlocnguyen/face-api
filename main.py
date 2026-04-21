@@ -637,3 +637,27 @@ async def recognize_esp32(request: Request):
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+import requests
+from fastapi import Request
+
+@app.post("/recognize-esp32-http")
+async def recognize_esp32_http(request: Request):
+    try:
+        # nhận raw từ ESP
+        contents = await request.body()
+
+        # forward lên Cloud Run
+        res = requests.post(
+            "https://smart-door-api-234169991545.asia-southeast1.run.app/recognize-esp32",
+            data=contents,
+            headers={
+                "Content-Type": "image/jpeg"
+            },
+            timeout=10
+        )
+
+        return res.json()
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
