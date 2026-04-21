@@ -294,3 +294,74 @@ async def register_face(
 def refresh():
     refresh_cache()
     return {"status": "refreshed"}
+
+@app.post("/users")
+def create_user(user_code: str = Form(...), full_name: str = Form(...)):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO smartdoor.core.users (
+            user_code, full_name, status, created_at, updated_at
+        )
+        VALUES (?, ?, 'active', current_timestamp(), current_timestamp())
+    """, (user_code, full_name))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {"success": True}
+
+@app.get("/users")
+def get_users():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT user_id, user_code, full_name
+        FROM smartdoor.core.users
+    """)
+
+    rows = cursor.fetchall()
+
+    result = []
+    for r in rows:
+        result.append({
+            "user_id": r[0],
+            "user_code": r[1],
+            "full_name": r[2]
+        })
+
+    return result
+
+@app.get("/logs")
+def get_logs():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT 
+            full_name_snapshot,
+            identify_method,
+            result,
+            from_utc_timestamp(created_at_utc, 'Asia/Ho_Chi_Minh')
+        FROM smartdoor.core.access_logs
+        ORDER BY created_at_utc DESC
+        LIMIT 20
+    """)
+
+    rows = cursor.fetchall()
+
+    result = []
+    for r in rows:
+        result.append({
+            "full_name_snapshot": r[0],
+            "identify_method": r[1],
+            "result": r[2],
+            "time": str(r[3])
+        })
+
+    return result
