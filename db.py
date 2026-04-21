@@ -32,11 +32,12 @@ def load_face_cache():
 
     return result
 
+
 def insert_log(data):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute(f"""
+    cursor.execute("""
         INSERT INTO smartdoor.core.access_logs (
             user_id,
             user_code,
@@ -48,19 +49,17 @@ def insert_log(data):
             similarity,
             captured_at_utc,
             created_at_utc
-        ) VALUES (
-            {data.get("user_id", "NULL")},
-            '{data.get("user_code", "")}',
-            '{data.get("full_name", "")}',
-            '{data.get("method")}',
-            '{data.get("channel")}',
-            '{data.get("result")}',
-            '{data.get("device_code", "")}',
-            {data.get("similarity", "NULL")},
-            current_timestamp(),
-            current_timestamp()
-        )
-    """)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, current_timestamp(), current_timestamp())
+    """, (
+        data.get("user_id"),
+        data.get("user_code"),
+        data.get("full_name"),
+        data.get("method"),
+        data.get("channel"),
+        data.get("result"),
+        data.get("device_code"),
+        data.get("similarity")
+    ))
 
     conn.commit()
     cursor.close()
